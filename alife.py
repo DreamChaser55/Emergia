@@ -4,6 +4,7 @@ from numba import njit, prange
 import random
 import math
 import ctypes
+import time
 
 # --- Simulation Parameters ---
 WIDTH, HEIGHT = 2560, 1440
@@ -283,6 +284,12 @@ class Simulation:
             surf = pygame.Surface((5, 5), pygame.SRCALPHA)
             pygame.draw.circle(surf, color, (2, 2), 2)
             self.species_surfaces.append(surf)
+        self._update_particle_surfaces()
+
+    def _update_particle_surfaces(self):
+        """Update the pre-computed list of surfaces for each particle."""
+        if hasattr(self, 'types') and hasattr(self, 'species_surfaces'):
+            self.particle_surfaces = [self.species_surfaces[t] for t in self.types]
 
     def randomize_rock_rules(self):
         """Generate random rock interactions for each species."""
@@ -321,12 +328,44 @@ class Simulation:
 
         self.grid_head = np.full(NUM_CELLS, -1, dtype=np.int32)
         self.grid_next = np.full(TOTAL_PARTICLES, -1, dtype=np.int32)
+        self._update_particle_surfaces()
 
     def reset_rocks(self):
         """Initialize rocks with random positions and sizes."""
         self.rock_positions = (np.random.rand(NUM_ROCKS, 2) * [WIDTH, HEIGHT]).astype(np.float32)
         self.rock_radii = np.random.uniform(MIN_ROCK_RADIUS, MAX_ROCK_RADIUS, NUM_ROCKS).astype(np.float32)
         self.rock_max_dist_sq = ((R_INTERACT + self.rock_radii)**2).astype(np.float32)
+        self._cache_background()
+
+    def _cache_background(self):
+        """Pre-render the background and static rocks onto a single surface."""
+        self.bg_surface = pygame.Surface((WIDTH, HEIGHT))
+        self.bg_surface.fill(BG_COLOR)
+        
+        # Draw rocks
+        for i in range(NUM_ROCKS):
+            x, y = int(self.rock_positions[i, 0]), int(self.rock_positions[i, 1])
+            r = int(self.rock_radii[i])
+            
+            # Base rock
+            pygame.draw.circle(self.bg_surface, ROCK_COLOR, (x, y), r)
+            
+            # Edge wrapping bounding box checks
+            wrap_x = []
+            if x - r < 0: wrap_x.append(WIDTH)
+            elif x + r >= WIDTH: wrap_x.append(-WIDTH)
+            
+            wrap_y = []
+            if y - r < 0: wrap_y.append(HEIGHT)
+            elif y + r >= HEIGHT: wrap_y.append(-HEIGHT)
+            
+            for dx in wrap_x:
+                pygame.draw.circle(self.bg_surface, ROCK_COLOR, (x + dx, y), r)
+            for dy in wrap_y:
+                pygame.draw.circle(self.bg_surface, ROCK_COLOR, (x, y + dy), r)
+            for dx in wrap_x:
+                for dy in wrap_y:
+                    pygame.draw.circle(self.bg_surface, ROCK_COLOR, (x + dx, y + dy), r)
 
     def apply_forces(self):
         """Computation of particle forces using numba."""
@@ -350,39 +389,14 @@ class Simulation:
 
     def draw(self, screen):
         """Render the particles and rocks."""
-        screen.fill(BG_COLOR)
+        screen.blit(self.bg_surface, (0, 0))
         
-        # Draw rocks
-        for i in range(NUM_ROCKS):
-            x, y = int(self.rock_positions[i, 0]), int(self.rock_positions[i, 1])
-            r = int(self.rock_radii[i])
-            
-            # Base rock
-            pygame.draw.circle(screen, ROCK_COLOR, (x, y), r)
-            
-            # Edge wrapping bounding box checks
-            wrap_x = []
-            if x - r < 0: wrap_x.append(WIDTH)
-            elif x + r >= WIDTH: wrap_x.append(-WIDTH)
-            
-            wrap_y = []
-            if y - r < 0: wrap_y.append(HEIGHT)
-            elif y + r >= HEIGHT: wrap_y.append(-HEIGHT)
-            
-            for dx in wrap_x:
-                pygame.draw.circle(screen, ROCK_COLOR, (x + dx, y), r)
-            for dy in wrap_y:
-                pygame.draw.circle(screen, ROCK_COLOR, (x, y + dy), r)
-            for dx in wrap_x:
-                for dy in wrap_y:
-                    pygame.draw.circle(screen, ROCK_COLOR, (x + dx, y + dy), r)
-            
-        # Fast rendering using blits
+        # Fast rendering using blits with pre-allocated surfaces and zip
         int_positions = self.positions.astype(np.int32) - 2
-        blits = [(self.species_surfaces[self.types[i]], (int_positions[i, 0], int_positions[i, 1])) for i in range(TOTAL_PARTICLES)]
-        screen.blits(blits)
+        screen.blits(zip(self.particle_surfaces, int_positions.tolist()))
 
 def main():
+    import time
     try:
         ctypes.windll.user32.SetProcessDPIAware() # type: ignore
     except AttributeError:
