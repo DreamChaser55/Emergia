@@ -32,10 +32,48 @@ GRID_WIDTH = int(math.ceil(WIDTH / CELL_SIZE))
 GRID_HEIGHT = int(math.ceil(HEIGHT / CELL_SIZE))
 NUM_CELLS = GRID_WIDTH * GRID_HEIGHT
 
+# Precompute grid neighbors and offsets for toriodal wrapping
+GRID_NEIGHBORS = np.zeros((GRID_HEIGHT, GRID_WIDTH, 9), dtype=np.int32)
+GRID_OFFSETS_X = np.zeros((GRID_HEIGHT, GRID_WIDTH, 9), dtype=np.float32)
+GRID_OFFSETS_Y = np.zeros((GRID_HEIGHT, GRID_WIDTH, 9), dtype=np.float32)
+
+for _cy in range(GRID_HEIGHT):
+    for _cx in range(GRID_WIDTH):
+        _idx = 0
+        for _d_cy in range(-1, 2):
+            for _d_cx in range(-1, 2):
+                _nx_raw = _cx + _d_cx
+                _ny_raw = _cy + _d_cy
+                
+                _offset_x = 0.0
+                if _nx_raw < 0:
+                    _nx_cell = _nx_raw + GRID_WIDTH
+                    _offset_x = -float(WIDTH)
+                elif _nx_raw >= GRID_WIDTH:
+                    _nx_cell = _nx_raw - GRID_WIDTH
+                    _offset_x = float(WIDTH)
+                else:
+                    _nx_cell = _nx_raw
+                    
+                _offset_y = 0.0
+                if _ny_raw < 0:
+                    _ny_cell = _ny_raw + GRID_HEIGHT
+                    _offset_y = -float(HEIGHT)
+                elif _ny_raw >= GRID_HEIGHT:
+                    _ny_cell = _ny_raw - GRID_HEIGHT
+                    _offset_y = float(HEIGHT)
+                else:
+                    _ny_cell = _ny_raw
+                    
+                _cell_idx = _ny_cell * GRID_WIDTH + _nx_cell
+                GRID_NEIGHBORS[_cy, _cx, _idx] = _cell_idx
+                GRID_OFFSETS_X[_cy, _cx, _idx] = _offset_x
+                GRID_OFFSETS_Y[_cy, _cx, _idx] = _offset_y
+                _idx += 1
+
 @njit
 def build_grid(positions, head, next_arr, grid_width, grid_height, cell_size, num_particles):
-    for i in range(len(head)):
-        head[i] = -1
+    head[:] = -1
         
     for i in range(num_particles):
         x = positions[i, 0]
@@ -55,9 +93,10 @@ def build_grid(positions, head, next_arr, grid_width, grid_height, cell_size, nu
 
 @njit(parallel=True, fastmath=True)
 def compute_forces_numba(positions, velocities, types, interaction_matrix,
-                         rock_positions, rock_radii, rock_interactions, num_rocks,
-                         num_particles, width, height, r_repel, r_interact,
-                         friction, max_velocity, head, next_arr, grid_width, grid_height, cell_size):
+                         rock_positions, rock_radii, rock_interactions, num_rocks, rock_max_dist_sq,
+                         num_particles, width, height, r_repel, r_interact, r_interact_sq,
+                         friction, max_velocity, head, next_arr, grid_width, grid_height, cell_size,
+                         grid_neighbors, grid_offsets_x, grid_offsets_y):
     
     for i in prange(num_particles):
         fx = 0.0
@@ -73,64 +112,43 @@ def compute_forces_numba(positions, velocities, types, interaction_matrix,
         if cy < 0: cy = 0
         elif cy >= grid_height: cy = grid_height - 1
         
-        for d_cx in range(-1, 2):
-            for d_cy in range(-1, 2):
-                nx_raw = cx + d_cx
-                ny_raw = cy + d_cy
-                
-                offset_x = 0.0
-                if nx_raw < 0:
-                    nx_cell = nx_raw + grid_width
-                    offset_x = -width
-                elif nx_raw >= grid_width:
-                    nx_cell = nx_raw - grid_width
-                    offset_x = width
-                else:
-                    nx_cell = nx_raw
-                    
-                offset_y = 0.0
-                if ny_raw < 0:
-                    ny_cell = ny_raw + grid_height
-                    offset_y = -height
-                elif ny_raw >= grid_height:
-                    ny_cell = ny_raw - grid_height
-                    offset_y = height
-                else:
-                    ny_cell = ny_raw
-                    
-                cell_idx = ny_cell * grid_width + nx_cell
-                j = head[cell_idx]
-                
-                while j != -1:
-                    if i == j:
-                        j = next_arr[j]
-                        continue
-                        
-                    p2_x = positions[j, 0]
-                    p2_y = positions[j, 1]
-                    t2 = types[j]
-                    
-                    dx = p2_x - p1_x + offset_x
-                    dy = p2_y - p1_y + offset_y
-                        
-                    dist_sq = dx*dx + dy*dy
-                    
-                    if dist_sq > 0.0 and dist_sq < r_interact * r_interact:
-                        dist = math.sqrt(dist_sq)
-                        nx = dx / dist
-                        ny = dy / dist
-                        
-                        if dist < r_repel:
-                            force = -1.0 * (1.0 - (dist / r_repel))
-                        else:
-                            base_force = interaction_matrix[t1, t2]
-                            mid_point = (r_repel + r_interact) / 2.0
-                            force = base_force * (1.0 - abs(dist - mid_point) / (mid_point - r_repel))
-                            
-                        fx += force * nx
-                        fy += force * ny
-                    
+        for neighbor_idx in range(9):
+            cell_idx = grid_neighbors[cy, cx, neighbor_idx]
+            offset_x = grid_offsets_x[cy, cx, neighbor_idx]
+            offset_y = grid_offsets_y[cy, cx, neighbor_idx]
+            
+            j = head[cell_idx]
+            
+            while j != -1:
+                if i == j:
                     j = next_arr[j]
+                    continue
+                    
+                p2_x = positions[j, 0]
+                p2_y = positions[j, 1]
+                t2 = types[j]
+                
+                dx = p2_x - p1_x + offset_x
+                dy = p2_y - p1_y + offset_y
+                    
+                dist_sq = dx*dx + dy*dy
+                
+                if dist_sq > 0.0 and dist_sq < r_interact_sq:
+                    dist = math.sqrt(dist_sq)
+                    nx = dx / dist
+                    ny = dy / dist
+                    
+                    if dist < r_repel:
+                        force = -1.0 * (1.0 - (dist / r_repel))
+                    else:
+                        base_force = interaction_matrix[t1, t2]
+                        mid_point = (r_repel + r_interact) / 2.0
+                        force = base_force * (1.0 - abs(dist - mid_point) / (mid_point - r_repel))
+                        
+                    fx += force * nx
+                    fy += force * ny
+                
+                j = next_arr[j]
 
         # Rock interactions
         for j in range(num_rocks):
@@ -153,9 +171,8 @@ def compute_forces_numba(positions, velocities, types, interaction_matrix,
                 dy += height
                 
             dist_sq = dx*dx + dy*dy
-            max_dist = r_interact + r_radius
             
-            if dist_sq > 0.0 and dist_sq < max_dist * max_dist:
+            if dist_sq > 0.0 and dist_sq < rock_max_dist_sq[j]:
                 dist = math.sqrt(dist_sq)
                 dist_to_surface = dist - r_radius
                 
@@ -309,15 +326,17 @@ class Simulation:
         """Initialize rocks with random positions and sizes."""
         self.rock_positions = (np.random.rand(NUM_ROCKS, 2) * [WIDTH, HEIGHT]).astype(np.float32)
         self.rock_radii = np.random.uniform(MIN_ROCK_RADIUS, MAX_ROCK_RADIUS, NUM_ROCKS).astype(np.float32)
+        self.rock_max_dist_sq = ((R_INTERACT + self.rock_radii)**2).astype(np.float32)
 
     def apply_forces(self):
         """Computation of particle forces using numba."""
         build_grid(self.positions, self.grid_head, self.grid_next, GRID_WIDTH, GRID_HEIGHT, np.float32(CELL_SIZE), TOTAL_PARTICLES)
         compute_forces_numba(
             self.positions, self.velocities, self.types, self.interaction_matrix,
-            self.rock_positions, self.rock_radii, self.rock_interactions, NUM_ROCKS,
-            TOTAL_PARTICLES, np.float32(WIDTH), np.float32(HEIGHT), np.float32(R_REPEL), np.float32(R_INTERACT),
-            np.float32(FRICTION), np.float32(MAX_VELOCITY), self.grid_head, self.grid_next, GRID_WIDTH, GRID_HEIGHT, np.float32(CELL_SIZE)
+            self.rock_positions, self.rock_radii, self.rock_interactions, NUM_ROCKS, self.rock_max_dist_sq,
+            TOTAL_PARTICLES, np.float32(WIDTH), np.float32(HEIGHT), np.float32(R_REPEL), np.float32(R_INTERACT), np.float32(R_INTERACT * R_INTERACT),
+            np.float32(FRICTION), np.float32(MAX_VELOCITY), self.grid_head, self.grid_next, GRID_WIDTH, GRID_HEIGHT, np.float32(CELL_SIZE),
+            GRID_NEIGHBORS, GRID_OFFSETS_X, GRID_OFFSETS_Y
         )
 
     def update_positions(self):
@@ -338,17 +357,36 @@ class Simulation:
             x, y = int(self.rock_positions[i, 0]), int(self.rock_positions[i, 1])
             r = int(self.rock_radii[i])
             
-            # Draw at all 9 wrapped positions to ensure seamless edge wrapping
-            for dx in (-WIDTH, 0, WIDTH):
-                for dy in (-HEIGHT, 0, HEIGHT):
+            # Base rock
+            pygame.draw.circle(screen, ROCK_COLOR, (x, y), r)
+            
+            # Edge wrapping bounding box checks
+            wrap_x = []
+            if x - r < 0: wrap_x.append(WIDTH)
+            elif x + r >= WIDTH: wrap_x.append(-WIDTH)
+            
+            wrap_y = []
+            if y - r < 0: wrap_y.append(HEIGHT)
+            elif y + r >= HEIGHT: wrap_y.append(-HEIGHT)
+            
+            for dx in wrap_x:
+                pygame.draw.circle(screen, ROCK_COLOR, (x + dx, y), r)
+            for dy in wrap_y:
+                pygame.draw.circle(screen, ROCK_COLOR, (x, y + dy), r)
+            for dx in wrap_x:
+                for dy in wrap_y:
                     pygame.draw.circle(screen, ROCK_COLOR, (x + dx, y + dy), r)
             
         # Fast rendering using blits
-        blits = [(self.species_surfaces[self.types[i]], (int(self.positions[i, 0]) - 2, int(self.positions[i, 1]) - 2)) for i in range(TOTAL_PARTICLES)]
+        int_positions = self.positions.astype(np.int32) - 2
+        blits = [(self.species_surfaces[self.types[i]], (int_positions[i, 0], int_positions[i, 1])) for i in range(TOTAL_PARTICLES)]
         screen.blits(blits)
 
 def main():
-    ctypes.windll.user32.SetProcessDPIAware() # Disable Windows DPI scaling for this app
+    try:
+        ctypes.windll.user32.SetProcessDPIAware() # type: ignore
+    except AttributeError:
+        pass
     pygame.init()
     screen = pygame.display.set_mode(size=(WIDTH, HEIGHT))
     pygame.display.set_caption(f"Particle Life - {TOTAL_PARTICLES} Particles, {NUM_SPECIES} Species")
