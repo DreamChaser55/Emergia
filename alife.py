@@ -351,7 +351,7 @@ def main():
     ctypes.windll.user32.SetProcessDPIAware() # Disable Windows DPI scaling for this app
     pygame.init()
     screen = pygame.display.set_mode(size=(WIDTH, HEIGHT))
-    pygame.display.set_caption(f"Particle Life - {TOTAL_PARTICLES} Particles")
+    pygame.display.set_caption(f"Particle Life - {TOTAL_PARTICLES} Particles, {NUM_SPECIES} Species")
     clock = pygame.time.Clock()
     
     sim = Simulation()
