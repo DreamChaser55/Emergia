@@ -1,6 +1,6 @@
-# Particle Life Simulation
+# Emergia
 
-A fast, interactive 2D artificial life simulation written in Python. This project simulates emergent behaviors—such as flocking, clustering, and cellular-like structures—from simple rules of attraction and repulsion between different "species" of particles. 
+A fast 2D artificial life simulation written in Python. This project simulates emergent behaviors—such as flocking, clustering, and cellular-like structures—from simple rules of attraction and repulsion between different "species" of particles. 
 
 ## Features
 
